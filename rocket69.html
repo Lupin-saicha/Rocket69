@@ -1,0 +1,1920 @@
+
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=0">
+    <title>Document</title>
+    <style>
+        body,
+        html {
+            margin: 0;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        canvas {
+            display: block;
+            position: fixed;
+            left: 0;
+            top: 0;
+        }
+
+        .wrapper {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: black;
+            z-index: 999;
+        }
+
+        .popup {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            font-size: 24px;
+            width: 280px;
+            background-color: white;
+            border-radius: 16px;
+            padding: 12px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .button {
+            border: none;
+            background-color: aqua;
+            color: black;
+            padding: 10px 16px;
+            border-radius: 12px;
+            font-weight: bold;
+            width: 120px;
+        }
+
+        .button:hover {
+            cursor: pointer;
+            background-color: cadetblue;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/3.4.2/gl-matrix-min.js"
+        integrity="sha512-eV9ExyTa3b+YHr99IBTYpwk4wbgDMDlfW8uTxhywO8dWb810fGUSKDgHhEv1fAqmJT4jyYnt1iWWMW4FRxeQOQ=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+</head>
+
+<body>
+    <div class="wrapper">
+        <div class="popup">
+            <div>
+                Would you like to play audio?
+            </div>
+            <div>
+                <button class="button" id="yes-audio">Yes</button>
+                <button class="button" id="no-audio">No</button>
+            </div>
+        </div>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script>
+        const { vec3, mat4, quat, vec2 } = glMatrix;
+
+        const vertexSource = `#version 300 es
+
+layout (location=0) in vec3 a_position;
+layout (location=1) in vec2 a_uv;
+layout (location=2) in vec3 a_normal;
+
+uniform mat4 matrix;
+uniform mat4 worldMatrix;
+
+out vec2 uv;
+out vec3 worldNormal;
+out vec3 worldPosition;
+
+void main() {
+    uv = a_uv;
+    worldNormal = mat3(worldMatrix) * a_normal;
+    worldPosition = (worldMatrix * vec4(a_position, 1.0)).xyz;
+
+    gl_Position = matrix * vec4(a_position, 1.0);
+}
+`;
+
+        const fragmentSource = `#version 300 es
+
+precision mediump float;
+
+in vec2 uv;
+in vec3 worldNormal;
+in vec3 worldPosition;
+
+uniform sampler2D mainTex;
+uniform vec4 color;
+uniform vec3 lightPosition;
+uniform vec3 ambientLight;
+
+out vec4 frag_color;
+
+void main() {
+    vec3 toLight = normalize(lightPosition - worldPosition);
+
+    float intensity = abs(dot(normalize(worldNormal), toLight));
+
+    vec4 texColor = texture(mainTex, uv);
+
+    frag_color = vec4((vec3(intensity) + ambientLight) * color.rgb * texColor.rgb, texColor.a);
+}
+`;
+
+        const particleVertexSource = `#version 300 es
+
+layout (location=0) in vec3 a_position;
+layout (location=1) in vec4 a_color;
+layout (location=2) in float a_size;
+
+uniform mat4 matrix;
+uniform float sizeMultiplier;
+
+out vec4 color;
+
+void main() {
+    
+    color = a_color;
+    gl_Position = matrix * vec4(a_position, 1.0);
+    gl_PointSize = a_size * sizeMultiplier / gl_Position.w;
+}
+`;
+
+        const particleFragmentSource = `#version 300 es
+
+precision mediump float;
+
+in vec4 color;
+
+out vec4 frag_color;
+
+void main() {
+    frag_color = color;
+}
+`;
+
+        const canvasVertexSource = `#version 300 es
+
+layout (location=0) in vec2 a_position;
+layout (location=1) in vec2 a_uv;
+
+out vec2 uv;
+
+void main() {
+    uv = a_uv;
+    gl_Position = vec4(a_position, 0.0, 1.0);
+}
+`;
+
+        const canvasFragmentSource = `#version 300 es
+
+precision mediump float;
+
+in vec2 uv;
+
+uniform sampler2D image;
+
+out vec4 fragColor;
+
+void main() {
+    fragColor = texture(image, uv);
+}
+`;
+
+        const starsFragmentSource = `#version 300 es
+
+precision mediump float;
+
+in vec2 uv;
+
+uniform float time;
+uniform vec2 resolution;
+
+out vec4 fragColor;
+
+// 3D Gradient noise from: https://www.shadertoy.com/view/Xsl3Dl
+vec3 hash( vec3 p ) // replace this by something better
+{
+    p = vec3( dot(p,vec3(127.1,311.7, 74.7)),
+              dot(p,vec3(269.5,183.3,246.1)),
+              dot(p,vec3(113.5,271.9,124.6)));
+
+    return -1.0 + 2.0*fract(sin(p)*43758.5453123);
+}
+float noise( in vec3 p )
+{
+    vec3 i = floor( p );
+    vec3 f = fract( p );
+    
+    vec3 u = f*f*(3.0-2.0*f);
+
+    return mix( mix( mix( dot( hash( i + vec3(0.0,0.0,0.0) ), f - vec3(0.0,0.0,0.0) ), 
+                          dot( hash( i + vec3(1.0,0.0,0.0) ), f - vec3(1.0,0.0,0.0) ), u.x),
+                     mix( dot( hash( i + vec3(0.0,1.0,0.0) ), f - vec3(0.0,1.0,0.0) ), 
+                          dot( hash( i + vec3(1.0,1.0,0.0) ), f - vec3(1.0,1.0,0.0) ), u.x), u.y),
+                mix( mix( dot( hash( i + vec3(0.0,0.0,1.0) ), f - vec3(0.0,0.0,1.0) ), 
+                          dot( hash( i + vec3(1.0,0.0,1.0) ), f - vec3(1.0,0.0,1.0) ), u.x),
+                     mix( dot( hash( i + vec3(0.0,1.0,1.0) ), f - vec3(0.0,1.0,1.0) ), 
+                          dot( hash( i + vec3(1.0,1.0,1.0) ), f - vec3(1.0,1.0,1.0) ), u.x), u.y), u.z );
+}
+
+void main()
+{
+    // Stars computation:
+    vec3 stars_direction = normalize(vec3(uv * 2.0f - 1.0f, 1.0f)); // could be view vector for example
+    float stars_threshold = 8.0f - 500. / min(resolution.x, resolution.y); // modifies the number of stars that are visible
+    float stars_exposure = 250.0f; // modifies the overall strength of the stars
+    float stars = pow(clamp(noise(stars_direction * 200.0f), 0.0f, 1.0f), stars_threshold) * stars_exposure;
+    stars *= mix(0.4, 1.4, noise(stars_direction * 100.0f + vec3(time))); // time based flickering
+    
+    // Output to screen
+    fragColor = vec4(vec3(stars),1.0);
+}
+`;
+
+        const bloomFragmentSource = `#version 300 es
+
+precision mediump float;
+
+in vec2 uv;
+
+uniform sampler2D image;
+
+uniform vec4 bloom;
+
+out vec4 fragColor;
+
+void main() {
+    vec2 onePixel = vec2(1) / vec2(textureSize(image, 0));
+    vec4 color = (texture(image, uv)
+        + texture(image, uv + onePixel * vec2(-1.0, -1.0))
+        + texture(image, uv + onePixel * vec2(0.0, -1.0))
+        + texture(image, uv + onePixel * vec2(1.0, -1.0))
+        + texture(image, uv + onePixel * vec2(1.0, 0.0))
+        + texture(image, uv + onePixel * vec2(1.0, 1.0))
+        + texture(image, uv + onePixel * vec2(0.0, 1.0))
+        + texture(image, uv + onePixel * vec2(-1.0, 1.0))
+        + texture(image, uv + onePixel * vec2(-1.0, 0.0))) / 9.0;
+    fragColor = color * bloom;
+}
+`;
+
+        function hslToRgb(h, s, l) {
+            var r, g, b;
+
+            if (s == 0) {
+                r = g = b = l; // achromatic
+            } else {
+                var hue2rgb = function hue2rgb(p, q, t) {
+                    if (t < 0) t += 1;
+                    if (t > 1) t -= 1;
+                    if (t < 1 / 6) return p + (q - p) * 6 * t;
+                    if (t < 1 / 2) return q;
+                    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+                    return p;
+                }
+
+                var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+                var p = 2 * l - q;
+                r = hue2rgb(p, q, h + 1 / 3);
+                g = hue2rgb(p, q, h);
+                b = hue2rgb(p, q, h - 1 / 3);
+            }
+
+            return [r, g, b, 1];
+        }
+
+        class MathUtils {
+
+            static lerp(x, a, b) {
+                return (b - a) * x + a;
+            }
+
+            static rand(min, max) {
+                return Math.random() * (max - min) + min;
+            }
+
+            static randInt(min, max) {
+                return Math.floor(this.rand(min, max + 1));
+            }
+
+            static clamp(x, a, b) {
+                return Math.min(Math.max(x, a), b);
+            }
+
+            static sat(x) {
+                return this.clamp(x, 0, 1);
+            }
+
+            static shuffle(arr) {
+                for (let i = 0; i < arr.length; ++i) {
+                    const idx = this.randInt(0, arr.length - 1);
+                    [arr[i], arr[idx]] = [arr[idx], arr[i]];
+                }
+            }
+
+            static choice(arr) {
+                return arr[this.randInt(0, arr.length - 1)];
+            }
+
+            static isPowerOf2(x) {
+                return (x & (x - 1)) == 0;
+            }
+
+            static max(arr) {
+                return Math.max(...arr);
+            }
+
+            static min(arr) {
+                return Math.min(...arr);
+            }
+
+            static avg(arr) {
+                return arr.reduce((acc, a) => acc + a) / arr.length;
+            }
+
+            static step(edge1, edge2, x) {
+                return (x - edge1) / (edge2 - edge1);
+            }
+
+            static radToDeg(rad) {
+                return rad / Math.PI * 180;
+            }
+
+            static degToRad(deg) {
+                return def / 180 * Math.PI;
+            }
+
+        }
+
+        class LinearSpline {
+
+            points = [];
+
+            constructor(lerp) {
+                this.lerp = lerp;
+            }
+
+            addPoint(t, val) {
+                this.points.push([t, val]);
+                for (let i = this.points.length - 1; i > 0; --i) {
+                    if (this.points[i][0] >= this.points[i - 1][0]) {
+                        break;
+                    }
+                    [this.points[i], this.points[i - 1]] = [this.points[i - 1], this.points[i]];
+                }
+            }
+
+            getValue(t) {
+                let idx1 = 0;
+
+                for (let i = 0; i < this.points.length; ++i) {
+                    if (t < this.points[i][0]) {
+                        break;
+                    }
+                    idx1 = i;
+                }
+
+                const p1 = this.points[idx1];
+
+                let idx2 = Math.min(idx1 + 1, this.points.length - 1);
+
+                if (idx1 == idx2) {
+                    return p1[1];
+                }
+
+                const p2 = this.points[idx2];
+
+                return this.lerp((t - p1[0]) / (p2[0] - p1[0]),
+                    p1[1],
+                    p2[1]);
+            }
+
+        }
+
+        class AssetsManager {
+
+            static _images = new Map();
+
+            static getImage(name) {
+                return this._images.get(name);
+            }
+
+            static loadImage(name, src) {
+                return new Promise((resolve, reject) => {
+                    const img = new Image();
+                    img.src = src;
+                    img.onload = () => {
+                        this._images.set(name, img);
+                        resolve(img);
+                    }
+                    img.onerror = () => {
+                        reject();
+                    }
+                });
+            }
+        }
+
+        /**
+             * 
+             * @param {WebGL2RenderingContext} gl 
+             */
+        const createAndSetupTexture = (gl) => {
+            const tex = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+            return tex;
+        }
+        class Texture {
+            static _ids = 0;
+
+            static fromImage(gl, data) {
+                const tex = new Texture(gl);
+
+                tex._width = data.width;
+                tex._height = data.height;
+
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, data);
+
+                return tex;
+            }
+
+            static fromPixelArray(gl, w, h, pixels) {
+                const tex = new Texture(gl);
+
+                tex._width = w;
+                tex._height = h;
+
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+                return tex;
+            }
+
+            /**
+             * @type {WebGL2RenderingContext}
+             */
+            _gl;
+            constructor(gl) {
+                this._id = Texture._ids++;
+                this._gl = gl;
+                this._width = 0;
+                this._height = 0;
+                this._tex = createAndSetupTexture(this._gl);
+            }
+            get id() {
+                return this._id;
+            }
+            get width() {
+                return this._width;
+            }
+            get height() {
+                return this._height;
+            }
+            bind() {
+                this._gl.bindTexture(this._gl.TEXTURE_2D, this._tex);
+            }
+            unbind() {
+                this._gl.bindTexture(this._gl.TEXTURE_2D, null);
+            }
+            update() { }
+        }
+
+        class Camera {
+            constructor(fov, aspect, near, far) {
+                this.fov = fov;
+                this.aspect = aspect;
+                this.near = near;
+                this.far = far;
+
+                this.position = vec3.fromValues(0, 0, 2);
+                this.direction = vec3.fromValues(0, 0, -1);
+                this.up = vec3.fromValues(0, 1, 0);
+
+                this.projectionM = mat4.create();
+                this.viewM = mat4.create();
+                this.PVM = mat4.create();
+                this.tpmVec = vec3.create();
+            }
+            lookAt(v) {
+                vec3.copy(this.tpmVec, v);
+
+                vec3.sub(this.tpmVec, this.tpmVec, this.position);
+                vec3.normalize(this.tpmVec, this.tpmVec);
+
+                vec3.copy(this.direction, this.tpmVec);
+
+                vec3.cross(this.up, this.getRight(), this.direction);
+                vec3.normalize(this.up, this.up);
+            }
+            getRight() {
+                return vec3.cross(vec3.create(), this.direction, this.up);
+            }
+            update() {
+                mat4.perspective(this.projectionM, this.fov, this.aspect, this.near, this.far);
+                mat4.lookAt(this.viewM, this.position, vec3.add(vec3.create(), this.position, this.direction), this.up);
+                mat4.multiply(this.PVM, this.projectionM, this.viewM);
+            }
+        }
+
+        class Shader {
+            /**
+             * @type {WebGL2RenderingContext}
+             */
+            _gl;
+            constructor(gl, vertexSource, fragmentSource, uniforms) {
+                this._gl = gl;
+                this._vertexSource = vertexSource;
+                this._fragmentSource = fragmentSource;
+                this._uniforms = uniforms;
+
+                this.start();
+            }
+            start() {
+                this._program = this._gl.createProgram();
+                this._vertexShader = this._createShader(this._gl.VERTEX_SHADER, this._vertexSource);
+                this._fragmentShader = this._createShader(this._gl.FRAGMENT_SHADER, this._fragmentSource);
+
+                this._gl.attachShader(this._program, this._vertexShader);
+                this._gl.attachShader(this._program, this._fragmentShader);
+                this._gl.linkProgram(this._program);
+                this._gl.useProgram(this._program);
+
+                for (let uniform of this._uniforms) {
+                    uniform.location = this._gl.getUniformLocation(this._program, uniform.name);
+                }
+            }
+            destroy() {
+                this._gl.deleteShader(this._vertexShader);
+                this._gl.deleteShader(this._fragmentShader);
+                this._gl.deleteProgram(this._program);
+            }
+            bind() {
+                this._gl.useProgram(this._program);
+            }
+            unbind() {
+                this._gl.useProgram(null);
+            }
+            supplyUniform(uniformName, value) {
+                const uniform = this._uniforms.find(e => e.name == uniformName);
+                if (uniform) {
+                    switch (uniform.type) {
+                        case "mat3":
+                            this._gl.uniformMatrix3fv(uniform.location, false, value);
+                            break;
+                        case "mat4":
+                            this._gl.uniformMatrix4fv(uniform.location, false, value);
+                            break;
+                        case "float":
+                            this._gl.uniform1f(uniform.location, value);
+                            break;
+                        case "float[]":
+                            this._gl.uniform1fv(uniform.location, value);
+                            break;
+                        case "vec2":
+                            this._gl.uniform2fv(uniform.location, value);
+                            break;
+                        case "vec3":
+                            this._gl.uniform3fv(uniform.location, value);
+                            break;
+                        case "vec4":
+                            this._gl.uniform4fv(uniform.location, value);
+                            break;
+                    }
+                }
+            }
+            getUniform(uniformName) {
+                return this._uniforms.find(e => e.name == uniformName);
+            }
+
+            _createShader(type, src) {
+                const shader = this._gl.createShader(type);
+                this._gl.shaderSource(shader, src);
+                this._gl.compileShader(shader);
+                if (this._gl.getShaderParameter(shader, this._gl.COMPILE_STATUS) == 0) {
+                    console.log(this._gl.getShaderInfoLog(shader));
+                }
+                return shader;
+            }
+        }
+
+        class Mesh {
+            constructor(geometry, material) {
+                this.geometry = geometry;
+                this.material = material;
+                this.position = vec3.create();
+                this.rotation = quat.create();
+                this.scale = vec3.fromValues(1, 1, 1);
+                this.transformMatrix = mat4.create();
+            }
+            draw(camera, light, isBloom = false) {
+                this.material.shader.bind();
+                this.material.shader.supplyUniform("color", isBloom ? this.material.bloom : this.material.color);
+                const matrix = mat4.create();
+                mat4.fromRotationTranslationScale(this.transformMatrix, this.rotation, this.position, this.scale);
+                mat4.multiply(matrix, camera.PVM, this.transformMatrix);
+                this.material.shader.supplyUniform("worldMatrix", this.transformMatrix);
+                this.material.shader.supplyUniform("matrix", matrix);
+                this.material.shader.supplyUniform("lightPosition", light.position);
+                this.material.shader.supplyUniform("ambientLight", light.ambient);
+                this.geometry.draw();
+            }
+        }
+
+        class Geometry {
+            constructor(gl, params = {}) {
+                this.params = params;
+                this.gl = gl;
+                this.material = params.material;
+
+                this.init();
+                this.start();
+            }
+            init() { }
+            start() {
+                this.vbo = this.gl.createBuffer();
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vbo);
+                this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(this.vertices), this.gl.STATIC_DRAW);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, null);
+
+                this.ebo = this.gl.createBuffer();
+                this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, this.ebo);
+                this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(this.indices), this.gl.STATIC_DRAW);
+                this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, null);
+
+                this.vao = this.gl.createVertexArray();
+                this.gl.bindVertexArray(this.vao);
+
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vbo);
+
+                this.gl.vertexAttribPointer(0, 3, this.gl.FLOAT, false, 8 * 4, 0 * 4);
+                this.gl.enableVertexAttribArray(0);
+                this.gl.vertexAttribPointer(1, 2, this.gl.FLOAT, false, 8 * 4, 3 * 4);
+                this.gl.enableVertexAttribArray(1);
+                this.gl.vertexAttribPointer(2, 3, this.gl.FLOAT, false, 8 * 4, 5 * 4);
+                this.gl.enableVertexAttribArray(2);
+
+                this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, this.ebo);
+
+                this.gl.bindVertexArray(null);
+            }
+            draw() {
+                this.gl.bindVertexArray(this.vao);
+                for (let c of this.drawCalls) {
+                    c.texture.bind();
+                    this.gl.drawElements(this.gl.TRIANGLES, c.count, this.gl.UNSIGNED_SHORT, c.offset);
+                }
+                this.gl.bindVertexArray(null);
+            }
+        }
+
+        class Quad extends Geometry {
+            init() {
+                this.vertices = [
+                    -1, 1, 0, 0, 0, 0, 0, 1,
+                    1, 1, 0, 1, 0, 0, 0, 1,
+                    1, -1, 0, 1, 1, 0, 0, 1,
+                    -1, -1, 0, 0, 1, 0, 0, 1
+                ];
+                this.indices = [
+                    0, 1, 2,
+                    0, 2, 3
+                ];
+                this.drawCalls = [
+                    {
+                        texture: new Texture(this.gl),
+                        offset: 0,
+                        count: 6
+                    }
+                ]
+            }
+        }
+
+        class Cube extends Geometry {
+            init() {
+                const halfWidth = this.params.width ? this.params.width / 2 : 0.5;
+                const halfHeight = this.params.height ? this.params.height / 2 : 0.5;
+                const halfDepth = this.params.depth ? this.params.depth / 2 : 0.5;
+
+                const positions = [
+                    // Front face
+                    -halfWidth, halfHeight, halfDepth,
+                    halfWidth, halfHeight, halfDepth,
+                    halfWidth, -halfHeight, halfDepth,
+                    -halfWidth, -halfHeight, halfDepth,
+
+                    // Back face
+                    halfWidth, halfHeight, -halfDepth,
+                    -halfWidth, halfHeight, -halfDepth,
+                    -halfWidth, -halfHeight, -halfDepth,
+                    halfWidth, -halfHeight, -halfDepth,
+
+                    // Top face
+                    -halfWidth, halfHeight, -halfDepth,
+                    halfWidth, halfHeight, -halfDepth,
+                    halfWidth, halfHeight, halfDepth,
+                    -halfWidth, halfHeight, halfDepth,
+
+                    // Bottom face
+                    -halfWidth, -halfHeight, halfDepth,
+                    halfWidth, -halfHeight, halfDepth,
+                    halfWidth, -halfHeight, -halfDepth,
+                    -halfWidth, -halfHeight, -halfDepth,
+
+                    // Right face
+                    halfWidth, halfHeight, halfDepth,
+                    halfWidth, halfHeight, -halfDepth,
+                    halfWidth, -halfHeight, -halfDepth,
+                    halfWidth, -halfHeight, halfDepth,
+
+                    // Left face
+                    -halfWidth, halfHeight, -halfDepth,
+                    -halfWidth, halfHeight, halfDepth,
+                    -halfWidth, -halfHeight, halfDepth,
+                    -halfWidth, -halfHeight, -halfDepth,
+                ];
+
+                const normals = [
+                    // Front face
+                    0.0, 0.0, 1.0,
+                    0.0, 0.0, 1.0,
+                    0.0, 0.0, 1.0,
+                    0.0, 0.0, 1.0,
+
+                    // Back face
+                    0.0, 0.0, -1.0,
+                    0.0, 0.0, -1.0,
+                    0.0, 0.0, -1.0,
+                    0.0, 0.0, -1.0,
+
+                    // Top face
+                    0.0, 1.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 1.0, 0.0,
+
+                    // Bottom face
+                    0.0, -1.0, 0.0,
+                    0.0, -1.0, 0.0,
+                    0.0, -1.0, 0.0,
+                    0.0, -1.0, 0.0,
+
+                    // Right face
+                    1.0, 0.0, 0.0,
+                    1.0, 0.0, 0.0,
+                    1.0, 0.0, 0.0,
+                    1.0, 0.0, 0.0,
+
+                    // Left face
+                    -1.0, 0.0, 0.0,
+                    -1.0, 0.0, 0.0,
+                    -1.0, 0.0, 0.0,
+                    -1.0, 0.0, 0.0,
+                ];
+                const uvs = [];
+                for (let i = 0; i < 6; ++i) {
+                    uvs.push(
+                        0, 0,
+                        1, 0,
+                        1, 1,
+                        0, 1
+                    );
+                }
+                this.indices = [
+                    0, 1, 2, 0, 2, 3,    // front
+                    4, 5, 6, 4, 6, 7,    // back
+                    8, 9, 10, 8, 10, 11,   // top
+                    12, 13, 14, 12, 14, 15,   // bottom
+                    16, 17, 18, 16, 18, 19,   // right
+                    20, 21, 22, 20, 22, 23,   // left
+                ];
+                this.vertices = [];
+                for (let i = 0; i < 24; ++i) {
+                    this.vertices.push(
+                        ...positions.slice(i * 3, i * 3 + 3),
+                        ...uvs.slice(i * 2, i * 2 + 2),
+                        ...normals.slice(i * 3, i * 3 + 3)
+                    );
+                }
+                this.drawCalls = [
+                    {
+                        texture: this.params.texture,
+                        count: 36,
+                        offset: 0
+                    }
+                ]
+            }
+        }
+
+        class Cone extends Geometry {
+            init() {
+                const radius = this.params.radius ?? 0.5;
+                const halfHeight = this.params.height ? this.params.height / 2 : 0.5;
+                const widthSegments = this.params.widthSegments ?? 32;
+
+                const positions = [];
+                const uvs = [];
+                const normals = [];
+                const indices = [];
+
+                const positionCache = [];
+
+                positionCache.push([0, halfHeight, 0]);
+
+                for (let i = 0; i <= widthSegments; ++i) {
+                    const angle1 = i / widthSegments * 2 * Math.PI;
+                    const sin1 = Math.sin(angle1);
+                    const cos1 = Math.cos(angle1);
+
+                    positionCache.push([cos1 * radius, -halfHeight, sin1 * radius]);
+                }
+
+                this.drawCalls = [];
+
+                let indexOffset = 0;
+                for (let i = 1; i <= widthSegments; ++i) {
+
+                    const indexCache = [0, i, i + 1];
+
+                    const normal = vec3.create();
+                    const v1 = vec3.sub(vec3.create(), positionCache[0], positionCache[i]);
+                    const v2 = vec3.sub(vec3.create(), positionCache[i + 1], positionCache[i]);
+                    vec3.cross(normal, v1, v2);
+                    vec3.normalize(normal, normal);
+
+                    for (let idx of indexCache) {
+                        positions.push(...positionCache[idx]);
+                        if (idx == 0) {
+                            uvs.push(0.5, 0.5);
+                        }
+                        else {
+                            let rad = ((idx - 1) / widthSegments * 2 * Math.PI);
+                            uvs.push(
+                                Math.cos(rad) * 0.5 + 0.5,
+                                1 - (Math.sin(rad) * 0.5 + 0.5)
+                            );
+                        }
+                        normals.push(...normal);
+                    }
+
+                    indices.push(
+                        indexOffset, indexOffset + 1, indexOffset + 2
+                    );
+                    indexOffset += 3;
+                }
+
+                this.drawCalls.push({
+                    texture: this.params.surfaceTexture,
+                    count: indexOffset,
+                    offset: 0
+                })
+
+                for (let i = 1; i < widthSegments; ++i) {
+                    const indexCache = [0, i, i + 1];
+
+                    const normal = vec3.fromValues(0, -1, 0);
+
+                    for (let idx of indexCache) {
+                        positions.push(...positionCache[idx + 1]);
+                        let rad = (idx / widthSegments * 2 * Math.PI);
+                        uvs.push(Math.cos(rad) * 0.5 + 0.5, 1 - (Math.sin(rad) * 0.5 + 0.5));
+                        normals.push(...normal);
+                    }
+
+                    indices.push(
+                        indexOffset, indexOffset + 1, indexOffset + 2
+                    );
+                    indexOffset += 3;
+                }
+
+                this.drawCalls.push({
+                    texture: this.params.baseTexture,
+                    count: indexOffset - this.drawCalls[0].count,
+                    offset: this.drawCalls[0].count * 2
+                })
+
+                this.indices = indices;
+                this.vertices = [];
+                for (let i = 0; i < indices.length; ++i) {
+                    this.vertices.push(
+                        ...positions.slice(i * 3, i * 3 + 3),
+                        ...uvs.slice(i * 2, i * 2 + 2),
+                        ...normals.slice(i * 3, i * 3 + 3)
+                    );
+                }
+
+
+            }
+        }
+
+        class Rocket extends Geometry {
+            init() {
+                let cnt, cnt1, r1, r2, r3, y1, y2, y3, y4, y5;
+                cnt = this.params.count;
+                cnt1 = 4;
+                r1 = 0.3;
+                r2 = 0.15;
+                r3 = 0.4;
+                y1 = 1;
+                y2 = 0.4;
+                y3 = -0.3;
+                y4 = 0.2;
+                y5 = -0.5;
+
+                this.drawCalls = [];
+
+                const points = [];
+
+                const arr = [[], [], [], []];
+
+                points.push([
+                    [0, y1, 0],
+                    [0.5, 0.5]
+                ]);
+
+                for (let i = 0; i <= cnt; ++i) {
+                    const a = i / cnt * Math.PI * 2;
+                    const c = Math.cos(a);
+                    const s = Math.sin(a);
+                    points[i + 1] = [
+                        [c * r1, y2, s * r1],
+                        [1 - i / cnt, 0]
+                    ];
+                    let rad = (i / cnt * 2 * Math.PI);
+                    points[i + 1 + cnt * 5] = [
+                        [c * r1, y2, s * r1],
+                        [Math.cos(rad) * 0.5 + 0.5, 1 - (Math.sin(rad) * 0.5 + 0.5)]
+                    ];
+                    points[i + 1 + cnt + 1] = [
+                        [c * r2, y3, s * r2],
+                        [1 - i / cnt, 1]
+                    ];
+
+                    if (i % (cnt / cnt1) == 1) {
+                        const r4 = ((x, a, b) => {
+                            return (b - a) * x + a;
+                        })((y4 - y3) / (y2 - y3), y3, y2);
+                        points[i + 2 + cnt * 2] = [
+                            [c * r4, y4, s * r4],
+                            [0, 1]
+                        ];
+                        points[i + 2 + cnt * 3] = [
+                            [c * r3, y5, s * r3],
+                            [0, 1]
+                        ];
+
+                        arr[2].push([
+                            [i + 2 + cnt, i + 2 + cnt * 2, i + 2 + cnt * 3],
+                            0
+                        ]);
+                    }
+
+                    if (i == cnt) {
+                        continue;
+                    }
+
+                    arr[0].push([
+                        [0, i + 1 + cnt * 5, i + 2 + cnt * 5],
+                        0
+                    ]);
+                    arr[1].push([
+                        [i + 1, i + 2, i + cnt + 3, i + cnt + 2],
+                        1
+                    ]);
+                    if (i > 0) {
+                        arr[3].push([
+                            [cnt + 2, i + cnt + 2, i + 1 + cnt + 2],
+                            7
+                        ]);
+                    }
+                }
+
+                const faces = [...arr[0], ...arr[1], ...arr[2], ...arr[3]];
+
+                const positions = [];
+                const indices = [];
+                const uvs = [];
+                const normals = [];
+
+                let counter = 0;
+
+                for (let face of faces) {
+
+                    for (let pidx of face[0]) {
+                        const point = points[pidx];
+                        positions.push(...point[0]);
+                        if (face[1] == 7) {
+                            let uv = [point[0][0], point[0][2]];
+                            vec2.normalize(uv, uv);
+                            vec2.scale(uv, uv, 0.5);
+                            vec2.add(uv, uv, [0.5, 0.5]);
+                            uv[1] = 1 - uv[1];
+                            uvs.push(...uv);
+                        }
+                        else {
+                            uvs.push(...point[1]);
+                        }
+                    }
+
+                    const normal = vec3.create();
+                    const v1 = vec3.sub(vec3.create(), points[face[0][1]][0], points[face[0][0]][0]);
+                    const v2 = vec3.sub(vec3.create(), points[face[0][2]][0], points[face[0][0]][0]);
+                    vec3.cross(normal, v1, v2);
+                    vec3.normalize(normal, normal);
+
+                    for (let i = 0; i < face[0].length; ++i) {
+                        normals.push(...normal);
+                    }
+
+                    switch (face[0].length) {
+                        case 3:
+                            indices.push(counter,
+                                counter + 1,
+                                counter + 2);
+                            break;
+                        case 4:
+                            indices.push(counter,
+                                counter + 1,
+                                counter + 2,
+                                counter,
+                                counter + 2,
+                                counter + 3
+                            );
+                            break;
+                    }
+
+                    counter += face[0].length;
+                }
+
+
+                this.indices = indices;
+                this.vertices = [];
+                for (let i = 0; i < indices.length; ++i) {
+                    this.vertices.push(
+                        ...positions.slice(i * 3, i * 3 + 3),
+                        ...uvs.slice(i * 2, i * 2 + 2),
+                        ...normals.slice(i * 3, i * 3 + 3)
+                    );
+                }
+
+                this.drawCalls.push({
+                    texture: this.params.textureTop,
+                    count: arr[0].length * 3,
+                    offset: 0
+                },
+                    {
+                        texture: this.params.textureBody,
+                        count: arr[1].length * 6,
+                        offset: arr[0].length * 3 * 2
+                    },
+                    {
+                        texture: this.params.textureWings,
+                        count: arr[2].length * 3,
+                        offset: (arr[0].length * 3 + arr[1].length * 6) * 2
+                    },
+                    {
+                        texture: this.params.textureBottom,
+                        count: arr[3].length * 3,
+                        offset: (arr[0].length * 3 + arr[1].length * 6 + arr[2].length * 3) * 2
+                    });
+
+            }
+        }
+
+        const Time = {
+            dt: 0,
+            elapsedTime: 0
+        }
+
+        let canvas, gl;
+        let music;
+
+        let mainProgram,
+            particleProgram,
+            canvasProgram,
+            starsProgram,
+            bloomProgram;
+        let things = [];
+        let camera;
+
+        const textures = new Map();
+        const geometries = new Map();
+
+        const light = {
+            ambient: [0.1, 0.1, 0.1],
+            position: [0, 1, 6]
+        }
+        const bloom = [2, 2, 2, 3];
+
+        const buffers = [];
+        const bufferSize = 64;
+
+        function createGridTexture(gl, w, h) {
+
+            const pixels = [];
+            for (let y = 0; y < h; ++y) {
+                for (let x = 0; x < w; ++x) {
+                    pixels.push(...((x + y) % 2 ? [255, 255, 255, 255] : [0, 0, 0, 255]));
+                }
+            }
+
+            return Texture.fromPixelArray(gl, w, h, new Uint8ClampedArray(pixels));
+        }
+
+        function createGradientTexture(gl, w, h) {
+            const ctx = document.createElement("canvas").getContext("2d");
+            ctx.canvas.width = w;
+            ctx.canvas.height = h;
+
+            const gradient = ctx.createConicGradient(0, w / 2, h / 2);
+
+            gradient.addColorStop(0, "red");
+            gradient.addColorStop(0.25, "orange");
+            gradient.addColorStop(0.5, "yellow");
+            gradient.addColorStop(0.75, "green");
+            gradient.addColorStop(1, "red");
+
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, w, h);
+
+            return Texture.fromImage(gl, ctx.canvas);
+        }
+
+        function createRocketBodyTexture(gl) {
+            const w = 256, h = 128;
+
+            const ctx = document.createElement("canvas").getContext("2d");
+            ctx.canvas.width = w;
+            ctx.canvas.height = h;
+
+            ctx.beginPath();
+            ctx.fillStyle = "white";
+            ctx.fillRect(0, 0, w, h);
+
+            for (let i = 0; i < 2; ++i) {
+                ctx.beginPath();
+                ctx.lineWidth = h * 0.04;
+                ctx.strokeStyle = "black";
+                ctx.fillStyle = "skyblue";
+                ctx.arc(w * 0.1 + i * w / 2, h * 0.3, h * 0.15, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.textAlign = "center";
+                ctx.fillStyle = "black";
+                ctx.font = "bold " + h * 0.25 + "px monospace";
+                ctx.fillText("69", w * 0.1 + i * w / 2, h * 0.7);
+            }
+
+            return Texture.fromImage(gl, ctx.canvas);
+        }
+
+        class Obstacle {
+            static height = 20;
+            static gap = 2.5;
+            static scale = 8;
+            static gapX = 9;
+            static startOffsetX = 20;
+            constructor(geometry, material) {
+                this.h = Obstacle.height;
+                this.gap = Obstacle.gap;
+                this.offsetY = 4;
+                this.passed = false;
+
+                this.meshTop = new Mesh(geometry, material);
+                vec3.scale(this.meshTop.scale, this.meshTop.scale, Obstacle.scale);
+                quat.rotateZ(this.meshTop.rotation, this.meshTop.rotation, Math.PI);
+                things.push(this.meshTop);
+
+                this.meshBottom = new Mesh(geometry, material);
+                vec3.scale(this.meshBottom.scale, this.meshBottom.scale, Obstacle.scale);
+                things.push(this.meshBottom);
+
+                this.setX(0);
+                this.randomizeY();
+            }
+            setColor(color) {
+                this.meshBottom.material.color = [...color];
+                this.meshTop.material.color = [...color];
+            }
+            setX(x) {
+                this.x = x;
+                this.meshTop.position[0] = x;
+                this.meshBottom.position[0] = x;
+            }
+            setY(y) {
+                this.y = y;
+
+                const halfH = this.h / 2;
+
+                this.meshBottom.position[1] = -halfH + y / 2;
+                this.meshBottom.scale[1] = y;
+
+                this.meshTop.position[1] = halfH - (this.h - (y + this.gap)) / 2;
+                this.meshTop.scale[1] = this.h - (y + this.gap);
+            }
+            randomizeY() {
+                const y = Math.random() * ((this.h - 2 * this.offsetY) - this.gap) + this.offsetY;
+                this.setY(y);
+            }
+            checkCollision(points) {
+
+                let minX = this.x - Obstacle.scale / 2,
+                    maxX = this.x + Obstacle.scale / 2;
+
+                const pointsTop = [
+                    minX, this.meshTop.position[1] + this.meshTop.scale[1] / 2,
+                    maxX, this.meshTop.position[1] + this.meshTop.scale[1] / 2,
+                    this.x, this.meshTop.position[1] - this.meshTop.scale[1] / 2
+                ];
+                const pointsBottom = [
+                    minX, this.meshBottom.position[1] - this.meshBottom.scale[1] / 2,
+                    maxX, this.meshBottom.position[1] - this.meshBottom.scale[1] / 2,
+                    this.x, this.meshBottom.position[1] + this.meshBottom.scale[1] / 2
+                ];
+
+                for (let i = 0; i < points.length; i += 2) {
+                    let point = [points[i * 2], points[i * 2 + 1]];
+
+                    if ((minX - point[0]) * (maxX - point[0]) >= 0) {
+                        continue;
+                    }
+
+
+                    if (insidePath(pointsTop, point[0], point[1])) {
+                        return true;
+                    }
+
+
+                    if (insidePath(pointsBottom, point[0], point[1])) {
+                        return true;
+                    }
+                }
+
+                if (insidePath(points, pointsTop[4], pointsTop[5]) || insidePath(points, pointsBottom[4], pointsBottom[5])) {
+                    return true;
+                }
+
+                return false;
+            }
+        }
+
+        let obstacles = [];
+
+        class Fire {
+            constructor(gl, params) {
+                this.gl = gl;
+                this.parent = params.parent;
+                this.material = {
+                    shader: params.shader,
+                    sizeMultiplier: params.sizeMultiplier
+                };
+                this.particles = [];
+                this.counter = 0;
+
+                this.sizeSpline = new LinearSpline(MathUtils.lerp);
+                this.sizeSpline.addPoint(0.0, 0.0);
+                this.sizeSpline.addPoint(0.5, 1.0);
+                this.sizeSpline.addPoint(1.0, 2.0);
+
+                this.start();
+            }
+            start() {
+                this.vbo = this.gl.createBuffer();
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vbo);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, null);
+
+
+                this.vao = this.gl.createVertexArray();
+                this.gl.bindVertexArray(this.vao);
+
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vbo);
+
+                this.gl.vertexAttribPointer(0, 3, this.gl.FLOAT, false, 8 * 4, 0 * 4);
+                this.gl.enableVertexAttribArray(0);
+                this.gl.vertexAttribPointer(1, 4, this.gl.FLOAT, false, 8 * 4, 3 * 4);
+                this.gl.enableVertexAttribArray(1);
+                this.gl.vertexAttribPointer(2, 1, this.gl.FLOAT, false, 8 * 4, 7 * 4);
+                this.gl.enableVertexAttribArray(2);
+
+                this.gl.bindVertexArray(null);
+            }
+            addParticles() {
+                if (this.disabled) return;
+                this.counter += Time.dt;
+                while (this.counter - 0.010 >= 0) {
+                    this.counter -= 0.05;
+
+                    const rotationMatrix = mat4.fromQuat(mat4.create(), this.parent.rotation);
+
+                    const radius = 0.1;
+                    const position = [
+                        (Math.random() * 2 - 1) * radius,
+                        (Math.random() * 2 - 1) * radius - this.parent.scale[1] * 0.4,
+                        (Math.random() * 2 - 1) * radius
+                    ];
+                    vec3.transformMat4(position, position, rotationMatrix);
+                    vec3.add(position, position, this.parent.position);
+
+                    const velocity = [0, -3, 0];
+                    vec3.transformMat4(velocity, velocity, rotationMatrix);
+
+                    const life = 0.5;
+
+                    const p = {
+                        position,
+                        velocity,
+                        baseSize: 1,
+                        size: 1,
+                        color: [1, 0.5, 0, 1],
+                        maxLifeTime: life,
+                        lifeTime: life
+                    };
+                    this.particles.push(p);
+                }
+            }
+            updateParticles() {
+                this.particles = this.particles.filter(p => p.lifeTime > 0);
+                for (let p of this.particles) {
+                    p.lifeTime -= Time.dt;
+                    const t = 1.0 - p.lifeTime / p.maxLifeTime;
+                    p.size = p.baseSize * this.sizeSpline.getValue(t);
+                    const frameVelocity = vec3.scale(vec3.create(), p.velocity, Time.dt);
+                    vec3.add(p.position, p.position, frameVelocity);
+                }
+            }
+            updateGeometry() {
+                const vertices = [];
+
+                for (let p of this.particles) {
+                    vertices.push(
+                        ...p.position,
+                        ...p.color,
+                        p.size
+                    );
+                }
+
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vbo);
+                this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(vertices), this.gl.STATIC_DRAW);
+            }
+            update() {
+                this.addParticles();
+                this.updateParticles();
+                this.updateGeometry();
+            }
+            draw(camera, light) {
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+
+                this.material.shader.bind();
+                this.material.shader.supplyUniform("matrix", camera.PVM);
+                this.material.shader.supplyUniform("sizeMultiplier", this.material.sizeMultiplier);
+
+                this.gl.bindVertexArray(this.vao);
+                this.gl.drawArrays(gl.POINT, 0, this.particles.length);
+                this.gl.bindVertexArray(null);
+
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            }
+        }
+
+        class Player {
+
+            static startGameSpeed = 3.5;
+
+            constructor(geometry, material, fire) {
+                this.mesh = new Mesh(geometry, material);
+                things.push(this.mesh);
+                this.gameSpeed = Player.startGameSpeed;
+                this.vy = 0;
+                this.flying = false;
+                this.maxSpeed = 15;
+                this.acceleration = 35;
+                this.gravity = 20;
+                this.ry = 0;
+                this.fire = fire;
+                this.fire.parent = this.mesh;
+                this.counter = 0;
+
+                this.points = [
+                    [0, 1],
+                    [0.3, 0.4],
+                    [-0.3, 0.4]
+                ];
+
+                this.reset();
+            }
+            reset() {
+                this.mesh.position[1] = -2.5;
+                this.vy = 0;
+                this.counter = 0;
+                this.ry = 0;
+                this.gameSpeed = Player.startGameSpeed;
+            }
+            update() {
+
+                this.fire.material.sizeMultiplier = canvas.height / 2 * Math.tan(Math.PI / 6);
+                this.fire.update();
+
+                if (started && !gameOver) {
+
+                    if ((this.counter += Time.dt) >= 10) {
+                        this.counter = 0;
+                        this.gameSpeed += 2 / this.gameSpeed;
+                    }
+
+                    if (this.flying) {
+                        if (this.vy < 0) {
+                            this.vy += this.acceleration * 1.5 * Time.dt;
+                        }
+                        else {
+                            this.vy += this.acceleration * Time.dt;
+                        }
+                    }
+
+                    this.vy -= this.gravity * Time.dt;
+
+                    if (Math.abs(this.vy) > this.maxSpeed) {
+                        this.vy = Math.sign(this.vy) * this.maxSpeed;
+                    }
+
+                    this.mesh.position[1] += this.vy * Time.dt;
+                }
+
+
+                let angle = this.vy * 0.08;
+                if (!gameOver) {
+                    this.ry += 2 * Time.dt;
+                }
+                quat.fromEuler(this.mesh.rotation, 0, this.ry / Math.PI * 180, (-Math.PI / 2 + angle) / Math.PI * 180);
+            }
+        }
+
+        let player;
+        let started = false;
+        let gameOver = false;
+        let gameOverTime, resetDelayInSeconds = 1.5;
+        let hue = 0;
+        let score = 0;
+
+        class Background {
+            constructor(geometry, shader) {
+                this.geometry = geometry;
+                this.shader = shader;
+            }
+            draw() {
+                this.shader.bind();
+                this.shader.supplyUniform("resolution", [canvas.width, canvas.height]);
+                this.shader.supplyUniform("time", Time.elapsedTime);
+                this.geometry.draw();
+            }
+        }
+
+        let background;
+
+        class UICanvas {
+            constructor(gl, geometry, shader) {
+                this.gl = gl;
+                this.geometry = geometry;
+                this.shader = shader;
+                this.texture = new Texture(gl);
+                this.ctx = document.createElement("canvas").getContext("2d");
+                this.minDimension = Math.min(innerWidth, innerHeight);
+            }
+            resize() {
+                this.ctx.canvas.width = innerWidth;
+                this.ctx.canvas.height = innerHeight;
+                this.minDimension = Math.min(innerWidth, innerHeight);
+            }
+            drawCanvas() {
+                const { ctx } = this;
+                const w = ctx.canvas.width,
+                    h = ctx.canvas.height,
+                    x = this.minDimension * 1;
+
+                ctx.beginPath();
+                ctx.clearRect(0, 0, w, h);
+
+                if (!started) {
+                    ctx.beginPath();
+                    ctx.fillStyle = "gold";
+                    ctx.textBaseline = "middle";
+                    ctx.textAlign = "center";
+                    ctx.font = "bold " + x / 6 + "px monospace";
+                    ctx.fillText("Rocket 69", w / 2, h / 4);
+                    ctx.beginPath();
+                    ctx.fillStyle = "white";
+                    ctx.textBaseline = "middle";
+                    ctx.textAlign = "center";
+                    ctx.font = x / 12 + "px monospace";
+                    ctx.fillText(Date.now() % 2000 < 1000 ? "-Tap to start-" : "-Play now-", w / 2, h / 2);
+                }
+                else if (gameOver) {
+                    ctx.beginPath();
+                    ctx.fillStyle = "red";
+                    ctx.textBaseline = "middle";
+                    ctx.textAlign = "center";
+                    ctx.font = "bold " + x / 7 + "px monospace";
+                    ctx.fillText("Game over", w / 2, h / 4);
+                    ctx.beginPath();
+                    ctx.fillStyle = "violet";
+                    ctx.textBaseline = "middle";
+                    ctx.textAlign = "center";
+                    ctx.font = "bold " + x / 9 + "px monospace";
+                    ctx.fillText("Score: " + score, w / 2, h / 4 * 3);
+                    if (gameOverTime + resetDelayInSeconds < Time.elapsedTime) {
+                        ctx.beginPath();
+                        ctx.fillStyle = "white";
+                        ctx.textBaseline = "middle";
+                        ctx.textAlign = "center";
+                        ctx.font = x / 12 + "px monospace";
+                        ctx.fillText(Date.now() % 2000 < 1000 ? "-Tap to restart-" : "-Try it again-", w / 2, h / 2);
+                    }
+                }
+                else {
+                    ctx.beginPath();
+                    ctx.fillStyle = "violet";
+                    ctx.textBaseline = "middle";
+                    ctx.textAlign = "center";
+                    ctx.font = "bold " + x / 7 + "px monospace";
+                    ctx.fillText(score, w / 2, h / 10);
+                }
+            }
+            draw() {
+                this.drawCanvas();
+
+                this.shader.bind();
+                this.texture.bind();
+                this.gl.texImage2D(this.gl.TEXTURE_2D, 0, this.gl.RGBA, this.gl.RGBA, this.gl.UNSIGNED_BYTE, this.ctx.canvas);
+                this.geometry.drawCalls[0].texture = this.texture;
+                this.geometry.draw();
+            }
+        }
+
+        let uiCanvas;
+
+        function reset() {
+            player.reset();
+            for (let i = 0; i < obstacles.length; ++i) {
+                let o = obstacles[i];
+                o.setX(Obstacle.startOffsetX + i * (Obstacle.gapX + (player.gameSpeed - Player.startGameSpeed) * 0.6));
+                o.passed = false;
+            }
+            score = 0;
+            player.fire.disabled = false;
+        }
+
+        function endGame() {
+            //player.mesh.position[1] = 999;
+            gameOverTime = Time.elapsedTime;
+            player.fire.disabled = true;
+        }
+
+        async function init() {
+            //console.log("Initializing!");
+
+            music = await loadAudio("https://raw.githubusercontent.com/DonDejvo/Rocket69/main/assets/Rocket69.mp3");
+            music.loop = true;
+
+            canvas = document.getElementById("canvas");
+            gl = canvas.getContext("webgl2");
+
+            let texW = canvas.width, texH = canvas.height;
+            for (let i = 0; i < 2; ++i) {
+                let tex = new Texture(gl);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, texW, texH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+                let fbo = gl.createFramebuffer();
+                gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex._tex, 0);
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+                buffers.push({
+                    tex,
+                    fbo
+                })
+
+                texW = bufferSize;
+                texH = bufferSize;
+            }
+
+            textures.set("t1", createGridTexture(gl, 16, 16));
+            textures.set("t2", createGradientTexture(gl, 256, 256));
+            textures.set("t3", Texture.fromPixelArray(gl, 1, 1, new Uint8ClampedArray([255, 0, 0, 255])));
+            textures.set("t4", Texture.fromPixelArray(gl, 1, 1, new Uint8ClampedArray([255, 255, 255, 255])));
+            textures.set("t5", Texture.fromPixelArray(gl, 1, 1, new Uint8ClampedArray([0, 0, 0, 255])));
+            textures.set("rocketBody", createRocketBodyTexture(gl, 256, 256));
+
+            camera = new Camera(Math.PI / 3, canvas.width / canvas.height, 0.1, 1000);
+            camera.position[0] = 1;
+            //camera.position[1] = -5;
+            camera.position[2] = 14;
+            camera.lookAt([1, 0, 0])
+
+            mainProgram = new Shader(gl, vertexSource, fragmentSource, [
+                { name: "color", type: "vec4" },
+                { name: "matrix", type: "mat4" },
+                { name: "worldMatrix", type: "mat4" },
+                { name: "lightPosition", type: "vec3" },
+                { name: "ambientLight", type: "vec3" }
+            ]);
+            particleProgram = new Shader(gl, particleVertexSource, particleFragmentSource, [
+                { name: "matrix", type: "mat4" },
+                { name: "sizeMultiplier", type: "float" }
+            ]);
+            starsProgram = new Shader(gl, canvasVertexSource, starsFragmentSource, [
+                { name: "resolution", type: "vec2" },
+                { name: "time", type: "float" }
+            ]);
+            canvasProgram = new Shader(gl, canvasVertexSource, canvasFragmentSource, [
+            ]);
+            bloomProgram = new Shader(gl, canvasVertexSource, bloomFragmentSource, [
+                { name: "bloom", type: "vec4" }
+            ]);
+
+            geometries.set("cone", new Cone(gl, {
+                widthSegments: 128,
+                surfaceTexture: textures.get("t4"),
+                baseTexture: textures.get("t4")
+            }));
+            geometries.set("cube", new Cube(gl, {
+                texture: textures.get("t4")
+            }));
+            geometries.set("quad", new Quad(gl, {
+
+            }));
+            geometries.set("rocket", new Rocket(gl, {
+                count: 64,
+                textureTop: textures.get("t3"),
+                textureBody: textures.get("rocketBody"),
+                textureWings: textures.get("t3"),
+                textureBottom: textures.get("t5")
+            }));
+
+            background = new Background(geometries.get("quad"), starsProgram);
+
+            uiCanvas = new UICanvas(gl, geometries.get("quad"), canvasProgram);
+
+            let bottomGround = new Mesh(geometries.get("cube"), { shader: mainProgram, color: [1, 1, 1, 1], bloom: [0, 0, 0, 0] });
+            bottomGround.position[1] = -0.25 - Obstacle.height / 2;
+            vec3.set(bottomGround.scale, 40, 0.5, 3)
+            things.push(bottomGround);
+
+            let topGround = new Mesh(geometries.get("cube"), { shader: mainProgram, color: [1, 1, 1, 1], bloom: [0, 0, 0, 0] });
+            topGround.position[1] = 0.25 + Obstacle.height / 2;
+            vec3.set(topGround.scale, 40, 0.5, 3)
+            things.push(topGround);
+
+
+            let fire = new Fire(gl, {
+                shader: particleProgram,
+                sizeMultiplier: 2
+            });
+            things.push(fire);
+            player = new Player(geometries.get("rocket"), { shader: mainProgram, color: [1, 1, 1, 1], bloom: [0, 0, 0, 0] }, fire);
+
+            for (let i = 0; i < 10; ++i) {
+                let o = new Obstacle(geometries.get("cone"), { shader: mainProgram, color: [1, 1, 1, 1], bloom: [0, 0, 0, 0] });
+                obstacles.push(o);
+                o.setX(Obstacle.startOffsetX + i * (Obstacle.gapX + (player.gameSpeed - Player.startGameSpeed) * 0.6));
+            }
+
+            const onDown = () => {
+                if (!started) {
+                    started = true;
+                    //requestFullScreen(canvas);
+                }
+                else if (gameOver && gameOverTime + resetDelayInSeconds < Time.elapsedTime) {
+                    gameOver = false;
+                    reset();
+                }
+                player.flying = true;
+            }
+
+            const onUp = () => {
+                player.flying = false;
+            }
+
+            const setAudioAndInput = (enabled) => {
+                document.querySelector(".wrapper").style.display = "none";
+
+                if (enabled) {
+                    music.play();
+                }
+
+                addEventListener("keydown", (e) => onDown())
+                addEventListener("keyup", (e) => onUp())
+                addEventListener("touchstart", (e) => onDown())
+                addEventListener("touchend", (e) => onUp())
+            }
+
+            document.getElementById("yes-audio").addEventListener("click", () => setAudioAndInput(true));
+            document.getElementById("no-audio").addEventListener("click", () => setAudioAndInput(false));
+
+            //console.log("Running...");
+
+            resize();
+            addEventListener("resize", resize);
+
+            animate();
+        }
+
+        function step() {
+
+            if ((hue += Time.dt * 0.1) >= 1) {
+                hue = 0;
+            }
+            camera.update();
+
+            if (started && !gameOver) {
+
+                for (let i = 0; i < obstacles.length; ++i) {
+                    const o = obstacles[i];
+
+                    if (o.x < -32) {
+                        o.x = obstacles[i == 0 ? obstacles.length - 1 : i - 1].x + (Obstacle.gapX + (player.gameSpeed - Player.startGameSpeed) * 0.6);
+                        o.randomizeY();
+                        o.passed = false;
+                    }
+
+                    o.setX(o.x - player.gameSpeed * Time.dt);
+
+                    const rotationMatrix = mat4.fromQuat(mat4.create(), player.mesh.rotation);
+                    const points = player.points.map(pt => {
+                        let point = [pt[0], pt[1], 0];
+                        vec3.multiply(point, point, player.mesh.scale);
+                        vec3.transformMat4(point, point, rotationMatrix);
+                        vec3.add(point, point, player.mesh.position);
+                        return [point[0], point[1]];
+                    }).flat();
+
+                    if (!o.passed && player.mesh.position[0] > o.x) {
+                        o.passed = true;
+                        score++;
+                    }
+
+                    if (o.checkCollision(points)) {
+                        gameOver = true;
+                    }
+                }
+                if (player.mesh.position[1] < -Obstacle.height / 2 || player.mesh.position[1] > Obstacle.height / 2) {
+                    gameOver = true;
+                }
+                if (gameOver) {
+                    endGame();
+                }
+            }
+
+            const obstacleColor = hslToRgb(hue, 0.5, 0.5);
+            for (let i = 0; i < obstacles.length; ++i) {
+                const o = obstacles[i];
+                o.setColor(obstacleColor);
+            }
+
+            player.update();
+
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+            gl.viewport(0, 0, canvas.width, canvas.height);
+
+            gl.clearColor(0, 0, 0, 1);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+            gl.disable(gl.DEPTH_TEST);
+
+            background.draw();
+
+            gl.enable(gl.DEPTH_TEST);
+
+            for (let thing of things) {
+                thing.draw(camera, light);
+            }
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, buffers[0].fbo);
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+
+            for (let thing of things) {
+                thing.draw(camera, light, true);
+            }
+            
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+            canvasProgram.bind();
+            
+            gl.disable(gl.DEPTH_TEST);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, buffers[1].fbo);
+            gl.viewport(0, 0, bufferSize, bufferSize);
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            
+            geometries.get("quad").drawCalls[0].texture = buffers[0].tex;
+            geometries.get("quad").draw();
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+
+            bloomProgram.bind();
+            bloomProgram.supplyUniform("bloom", bloom);
+            
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+            geometries.get("quad").drawCalls[0].texture = buffers[1].tex;
+            geometries.get("quad").draw();
+
+            gl.disable(gl.DEPTH_TEST);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            uiCanvas.draw();
+        }
+
+        function resize() {
+            canvas.width = innerWidth;
+            canvas.height = innerHeight;
+            camera.aspect = innerWidth / innerHeight;
+            uiCanvas.resize();
+
+            buffers[0].tex.bind();
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        }
+
+        function animate() {
+            requestAnimationFrame((t) => {
+                animate();
+                t *= 0.001;
+                Time.dt = Math.min(t - (Time._lastRAF || t), 1 / 30);
+                Time._lastRAF = t;
+                Time.elapsedTime += Time.dt;
+                step();
+            })
+        }
+
+        function requestFullScreen(element) {
+            // Supports most browsers and their versions.
+            var requestMethod = element.requestFullScreen || element.webkitRequestFullScreen || element.mozRequestFullScreen || element.msRequestFullScreen;
+
+            if (requestMethod) { // Native full screen.
+                requestMethod.call(element);
+            } else if (typeof window.ActiveXObject !== "undefined") { // Older IE.
+                var wscript = new ActiveXObject("WScript.Shell");
+                if (wscript !== null) {
+                    wscript.SendKeys("{F11}");
+                }
+            }
+        }
+
+        function insidePath(path, x, y) {
+            var count = 0;
+            var x1 = path[path.length - 2];
+            var y1 = path[path.length - 1];
+            var x2 = path[0];
+            var y2 = path[1];
+            if ((y - y1) * (y - y2) <= 0 && (x <= x1 || x <= x2) && (x1 >= x && x2 >= x || (x2 - x1) * (y - y1) / (y2 - y1) >= x - x1)) count++;
+            for (var i = 2; i < path.length; i += 2) {
+                var x1 = path[i - 2];
+                var y1 = path[i - 1];
+                var x2 = path[i];
+                var y2 = path[i + 1];
+                if ((y - y1) * (y - y2) <= 0 && (x <= x1 || x <= x2) && (x1 >= x && x2 >= x || (x2 - x1) * (y - y1) / (y2 - y1) >= x - x1)) count++;
+            }
+            return count % 2;
+        }
+
+        function loadAudio(src) {
+            return new Promise(resolve => {
+                const audio = new Audio();
+                audio.src = src;
+                audio.addEventListener("canplaythrough", () => {
+                    resolve(audio);
+                })
+                audio.load();
+            });
+        }
+
+        onload = init;
+    </script>
+</body>
+
+</html>
